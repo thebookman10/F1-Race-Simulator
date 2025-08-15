@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1950s F1 Race Simulator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/papaparse/5.3.0/papaparse.min.js"></script>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #00ff00;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.4;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #000;
+            border: 2px solid #00ff00;
+            padding: 20px;
+            border-radius: 10px;
+        }
+        h1, h2 {
+            color: #ffff00;
+            text-align: center;
+            text-shadow: 0 0 10px #ffff00;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #333;
+            border-radius: 5px;
+        }
+        select, button, input[type="number"], input[type="text"] { /* Added input[type="number"] */
+            background: #333;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            padding: 8px;
+            border-radius: 3px;
+            font-family: inherit;
+        }
+        button {
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background: #00ff00;
+            color: #000;
+            box-shadow: 0 0 10px #00ff00;
+        }
+        .results {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .race-results, .dnf-analysis, .lap-times {
+            border: 1px solid #00ff00;
+            padding: 15px;
+            border-radius: 5px;
+            background: #111;
+        }
+        .position {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px;
+            margin: 2px 0;
+            border-left: 3px solid #00ff00;
+            background: #222;
+        }
+        .dnf {
+            border-left-color: #ff0000;
+            color: #ff8888;
+        }
+        .mechanical {
+            border-left-color: #ff8800;
+        }
+        .driver-error {
+            border-left-color: #ff0088;
+        }
+        .stats-display {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .stat-card {
+            border: 1px solid #666;
+            padding: 10px;
+            border-radius: 5px;
+            background: #1a1a1a;
+        }
+        .weather-indicator {
+            font-weight: bold;
+        }
+        .weather-indicator.dry {
+            color: #ffff00; /* Yellow for dry */
+        }
+        .weather-indicator.wet {
+            color: #88ccff; /* Blue for wet */
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏁 1950s Formula 1 Race Simulator 🏁</h1>
+        
+        <div class="controls">
+            <div>
+                <label>Track Type:</label>
+                <select id="trackType">
+                    <option value="street">Street Circuit</option>
+                    <option value="balanced" selected>Balanced Circuit</option>
+                    <option value="simple">Simple Circuit</option>
+                </select>
+            </div>
+            <div>
+                <label>Weather:</label>
+                <select id="weather">
+                    <option value="dry" selected>Dry</option>
+                    <option value="wet">Wet</option>
+                </select>
+            </div>
+            <div>
+                <label>Race Distance (Laps):</label>
+                <!-- Changed from select to input type="number" -->
+                <input type="number" id="raceDistance" value="75" min="1">
+            </div>
+            <div>
+                <label>Driver Selection:</label>
+                <select id="driverSelection">
+                    <option value="main" selected>Main Drivers Only</option>
+                    <option value="all">All Drivers (Main + Reserves)</option>
+                    <option value="main-privateers">Main + Privateers</option>
+                    <option value="everyone">Everyone (Main + Reserves + Privateers)</option>
+                </select>
+            </div>
+            <div>
+                <label>Development Rounds:</label>
+                <input type="number" id="devRounds" value="0" min="0" max="10">
+            </div>
+            <button onclick="simulateRace()" style="grid-column: 1 / -1;">🏁 Simulate Race</button>
+        </div>
+
+        <div class="results" id="results" style="display: none;">
+            <div class="race-results">
+                <h2>Race Results</h2>
+                <div id="raceResultsList"></div>
+            </div>
+            
+            <div class="dnf-analysis">
+                <h2>DNF Analysis</h2>
+                <div id="dnfAnalysis"></div>
+            </div>
+            
+            <div class="lap-times" style="grid-column: 1 / -1;">
+                <h2>Performance Analysis</h2>
+                <div id="performanceAnalysis"></div>
+            </div>
+        </div>
+
+        <div class="stats-display" id="statsDisplay">
+            <!-- Car and driver stats will be displayed here -->
+        </div>
+    </div>
+
+    <script>
+        // Car data from CSV with team assignments
+        const carData = {
+            'AL-33': { power: 1.2, cornering: 0.6, reliability: 0.4, focus: 'Reliability', team: 'AIA' },
+            'LW-15': { power: 2.3, cornering: 1.5, reliability: 0.8, focus: 'Balanced', team: 'Lighting Wings' },
+            'RZ-35': { power: 2.5, cornering: 0.4, reliability: 0.6, focus: 'Balanced', team: 'RAZ' },
+            'RS-54': { power: 2.6, cornering: 2.6, reliability: 0.8, focus: 'Cornering', team: 'Red Herring' },
+            'SA-53': { power: 2.2, cornering: 2.0, reliability: 0.9, focus: 'Balanced', team: 'Saint Ard' },
+            'VNR-01': { power: 1.2, cornering: 0.8, reliability: 0.1, focus: 'Balanced', team: 'VNR' },
+            'WZ-12': { power: 2.2, cornering: 0.6, reliability: 1.4, focus: 'Balanced', team: 'WHI Dynamics' }
+        };
+
+        // Complete driver roster from CSV files with proper car assignments
+        const drivers = [
+            // Alvarez Industries (AL-33)
+            { car: 20, name: 'Isandro Virelli', nationality: 'Lespian', traits: ['Talented', 'Aggressive'], pace: 2, consistency: 0, carModel: 'AL-33', status: 'Main' },
+            { car: 20, name: 'Camila Estévez', nationality: 'Lespian', traits: ['Reserve', 'Mechanic'], pace: 0, consistency: 2, carModel: 'AL-33', status: 'Reserve' },
+            
+            // Northumshire Racing Club RAZ (RZ-35)
+            { car: 21, name: 'Luise Vasilievsky', nationality: 'Rumburgian', traits: ['Gentlemen', 'Pay Driver'], pace: -2, consistency: -1, carModel: 'RZ-35', status: 'Main' },
+            { car: 21, name: 'Arnold Entwistle', nationality: 'Rumburgian', traits: ['Reserve', 'Gentlemen'], pace: -1, consistency: 0, carModel: 'RZ-35', status: 'Reserve' },
+            { car: 77, name: 'Arthur Savinkov', nationality: 'Blud-Rummish', traits: ['Gentlemen', 'Inconsistent'], pace: -1, consistency: -2, carModel: 'RZ-35', status: 'Main' },
+            { car: 77, name: 'Pal Grace-Fountaine', nationality: 'Rumburgian', traits: ['Reserve', 'Gentlemen'], pace: -1, consistency: 0, carModel: 'RZ-35', status: 'Reserve' },
+            
+            // St. Ard Motor Works (SA-53)
+            { car: 13, name: 'Maxence du Clairvaux', nationality: 'Arcasian', traits: ['Gentlemen', 'Calm'], pace: -2, consistency: 1, carModel: 'SA-53', status: 'Main' },
+            { car: 13, name: 'Étienne Marceau', nationality: 'Arcasian', traits: ['Reserve', 'Rain Master'], pace: 3, consistency: 3, carModel: 'SA-53', status: 'Reserve' },
+            { car: 99, name: 'Lucien de Rouvray', nationality: 'Arcasian', traits: ['Pay Driver', 'Rookie'], pace: -1, consistency: -2, carModel: 'SA-53', status: 'Main' },
+            { car: 99, name: 'Théodore Saint-Amand', nationality: 'Arcasian', traits: ['Reserve', 'Tractor'], pace: -2, consistency: 1, carModel: 'SA-53', status: 'Reserve' },
+            { car: 17, name: 'Nadar Vandes', nationality: 'Free Cities', traits: ['Ace', 'Professor'], pace: 3, consistency: 4, carModel: 'SA-53', status: 'Main' },
+            { car: 17, name: 'Soraya Maorin', nationality: 'Free Cities', traits: ['Reserve', 'Struggler'], pace: -2, consistency: -1, carModel: 'SA-53', status: 'Reserve' },
+            
+            // Valkenburgh Noorderlicht Racing (VNR-01)
+            { car: 14, name: 'Arjen van Veld', nationality: 'Agnolian', traits: ['Fast', 'Inconsistent'], pace: 2, consistency: -2, carModel: 'VNR-01', status: 'Main' },
+            { car: 14, name: 'Matteo Driesens', nationality: 'Agno-Lespian', traits: ['Reserve', 'Calm'], pace: -1, consistency: 1, carModel: 'VNR-01', status: 'Reserve' },
+            { car: 29, name: 'Kristiaan Marc', nationality: 'Agno-Sordish', traits: ['Talented', 'Overdriver'], pace: 2, consistency: -1, carModel: 'VNR-01', status: 'Main' },
+            { car: 29, name: 'Jens Engelbrecht', nationality: 'Agnolian', traits: ['Reserve', 'Backmarker'], pace: -2, consistency: -2, carModel: 'VNR-01', status: 'Reserve' },
+            
+            // WHI Dynamics (WZ-12)
+            { car: 31, name: 'Kimi Lodziarz', nationality: 'Wehlenian', traits: ['Talented', 'Iceman'], pace: 0, consistency: 3, carModel: 'WZ-12', status: 'Main' },
+            { car: 31, name: 'Wiktor Krakowski', nationality: 'Wehlenian', traits: ['Reserve', 'Erratic'], pace: -1, consistency: -2, carModel: 'WZ-12', status: 'Reserve' },
+            { car: 73, name: 'Maria Nowak', nationality: 'Wehlenian', traits: ['Honey Badger', 'Tractor'], pace: 0, consistency: 0, carModel: 'WZ-12', status: 'Main' },
+            { car: 73, name: 'Nigel Czerna', nationality: 'Wehlenian', traits: ['Reserve', 'Aggressive'], pace: 1, consistency: -1, carModel: 'WZ-12', status: 'Reserve' },
+            
+            // Red Herring Motor Cooperative (RS-54)
+            { car: 44, name: 'Felix Buschbauer', nationality: 'Valgslandic', traits: ['Rocketship', 'Experienced'], pace: 2, consistency: 2, carModel: 'RS-54', status: 'Main' },
+            { car: 44, name: 'Elias Winterberg', nationality: 'Valgslandic', traits: ['Reserve', 'Mechanic'], pace: 0, consistency: 2, carModel: 'RS-54', status: 'Reserve' },
+            { car: 45, name: 'Johannes Vonk', nationality: 'Agno-Valgs', traits: ['Speedy', 'Pay Driver'], pace: 0, consistency: -1, carModel: 'RS-54', status: 'Main' },
+            { car: 45, name: 'Jonas Hellforst', nationality: 'Valgslandic', traits: ['Reserve', 'Slow'], pace: -2, consistency: 0, carModel: 'RS-54', status: 'Reserve' },
+            
+            // Lightning Wings Racing Team (LW-15)
+            { car: 86, name: 'Alejandro Cortés', nationality: 'Unknown', traits: ['Hothead', 'Talented'], pace: 3, consistency: -1, carModel: 'LW-15', status: 'Main' },
+            { car: 86, name: 'Carlos Delgado', nationality: 'Unknown', traits: ['Reserve', 'Rookie'], pace: 0, consistency: -1, carModel: 'LW-15', status: 'Reserve' },
+            { car: 18, name: 'Lindiwe Cruz', nationality: 'Unknown', traits: ['Coolheaded', 'Struggler'], pace: -4, consistency: 1, carModel: 'LW-15', status: 'Main' },
+            { car: 18, name: 'Henri DuPont', nationality: 'Unknown', traits: ['Reserve', 'Backmarker'], pace: -2, consistency: -2, carModel: 'LW-15', status: 'Reserve' },
+            
+            // Privateers and Customers with various cars
+            { car: 3, name: 'Marko Zdravko', nationality: 'Unknown', traits: ['Aggressive', 'Inconsistent'], pace: 1, consistency: -3, carModel: 'SA-53', status: 'Privateer' },
+            { car: 59, name: 'Klaus Andersen', nationality: 'Unknown', traits: ['Mechanic', 'Calm'], pace: -1, consistency: 3, carModel: 'WZ-12', status: 'Privateer' },
+            { car: 59, name: 'Otmar Breitschneider', nationality: 'Unknown', traits: ['Reserve', 'Erratic'], pace: -1, consistency: -2, carModel: 'WZ-12', status: 'Reserve' },
+            { car: 15, name: 'Enzo Marcelli', nationality: 'Unknown', traits: ['Rocketship', 'Overdriver'], pace: 3, consistency: -1, carModel: 'LW-15', status: 'Privateer' },
+            { car: 15, name: 'Fyodor Petrov', nationality: 'Unknown', traits: ['Reserve', 'Tractor'], pace: -2, consistency: 1, carModel: 'LW-15', status: 'Reserve' },
+            { car: 38, name: 'Thabo Mensah', nationality: 'Unknown', traits: ['Talented', 'Rookie'], pace: 1, consistency: 0, carModel: 'AL-33', status: 'Privateer' },
+            { car: 38, name: 'Isabelle Clermont', nationality: 'Unknown', traits: ['Reserve', 'Struggler'], pace: -2, consistency: -1, carModel: 'AL-33', status: 'Reserve' },
+            { car: 66, name: 'Marcus Reed', nationality: 'Unknown', traits: ['Fast', 'Erratic'], pace: 1, consistency: -2, carModel: 'RZ-35', status: 'Privateer' },
+            { car: 66, name: 'Jason Bell', nationality: 'Unknown', traits: ['Reserve', 'Pay Driver'], pace: -1, consistency: -1, carModel: 'RZ-35', status: 'Reserve' },
+            { car: 74, name: 'Michael Donovan', nationality: 'Unknown', traits: ['Ace', 'Coolheaded'], pace: 0, consistency: 4, carModel: 'VNR-01', status: 'Privateer' },
+            { car: 74, name: 'Jonathon McGraw', nationality: 'Unknown', traits: ['Reserve', 'Backmarker'], pace: -2, consistency: -2, carModel: 'VNR-01', status: 'Reserve' },
+            { car: 47, name: 'Rami Al-Faris', nationality: 'Unknown', traits: ['Speedy', 'Erratic'], pace: 0, consistency: -2, carModel: 'RS-54', status: 'Privateer' },
+            { car: 64, name: 'Damir Stefanović', nationality: 'Unknown', traits: ['Overdriver', 'Inconsistent'], pace: 1, consistency: -4, carModel: 'RS-54', status: 'Privateer' },
+            { car: 49, name: 'Leonid von Falkenrath', nationality: 'Unknown', traits: ['Slow', 'Struggler'], pace: -4, consistency: -1, carModel: 'SA-53', status: 'Privateer' },
+            { car: 35, name: 'Gérard Leclerc', nationality: 'Unknown', traits: ['Struggler', 'Rookie'], pace: -2, consistency: -2, carModel: 'AL-33', status: 'Privateer' },
+            { car: 56, name: 'Thiago Mbeki', nationality: 'Unknown', traits: ['Backmarker', 'Pay Driver'], pace: -3, consistency: -3, carModel: 'WZ-12', status: 'Privateer' },
+            { car: 56, name: 'Andre Dlamini', nationality: 'Unknown', traits: ['Reserve', 'Tractor'], pace: -2, consistency: 1, carModel: 'WZ-12', status: 'Reserve' }
+        ];
+
+        // Track multipliers for different track types
+        const trackMultipliers = {
+            street: { power: 0.6, cornering: 1.4, reliability: 1.0, baseLapModifier: 1.1 }, // Slower overall
+            balanced: { power: 1.0, cornering: 1.0, reliability: 1.0, baseLapModifier: 1.0 }, // Normal
+            simple: { power: 1.4, cornering: 0.6, reliability: 1.0, baseLapModifier: 0.9 } // Faster overall
+        };
+
+        // Weather effects
+        const weatherEffects = {
+            dry: { pace: 1.0, reliability: 1.0, consistency: 1.0, rainBonus: 1.0 },
+            wet: { pace: 0.85, reliability: 0.9, consistency: 0.7, rainBonus: 1.15 } // Wet weather specialist gain more pace in wet
+        };
+
+        /**
+         * Calculates a driver's performance metrics for a given race.
+         * @param {object} driver - The driver object.
+         * @param {string} trackType - The type of track ('street', 'balanced', 'simple').
+         * @param {string} weather - The weather condition ('dry', 'wet').
+         * @param {number} developmentRounds - Number of development rounds applied to cars.
+         * @returns {object} An object containing calculated speed, consistency, reliability, avgLapTime, and totalTime.
+         */
+        function calculateDriverPerformance(driver, trackType, weather, developmentRounds = 0, raceDistance) {
+            const car = carData[driver.carModel];
+            const trackMult = trackMultipliers[trackType];
+            const weatherMult = weatherEffects[weather];
+
+            // Apply development rounds bonus to car stats
+            const devBonus = 1 + (developmentRounds * 0.02); // Each round adds 2%
+            const carPower = car.power * devBonus;
+            const carCornering = car.cornering * devBonus;
+            const carReliability = car.reliability * devBonus;
+
+            // Calculate car performance based on track type
+            const carPerformance = (carPower * trackMult.power) + (carCornering * trackMult.cornering);
+
+            // Calculate driver pace and consistency, scaled from -4 to +4 to a 0-10 range for easier use
+            const driverPaceScaled = (driver.pace + 4) / 8 * 10; // 0 (worst) to 10 (best)
+            const driverConsistencyScaled = (driver.consistency + 4) / 8 * 10; // 0 (worst) to 10 (best)
+
+            // Adjust pace for 'Rain Master' trait in wet conditions
+            let rainBonus = 1.0;
+            if (weather === 'wet' && driver.traits.includes('Rain Master')) {
+                rainBonus = weatherMult.rainBonus; // Gives a bonus in wet conditions
+            }
+
+            // Calculate final speed (higher is better, aiming for a base of 0-10 scale)
+            // Base speed influenced by car performance (60%) and driver pace (40%)
+            const baseSpeed = ((carPerformance / 20 * 0.6) + (driverPaceScaled / 10 * 0.4)) * weatherMult.pace * rainBonus; // Normalize car performance to 0-1 range
+
+            // Calculate consistency factor (higher is better, less variation)
+            const consistencyFactor = (carReliability / 20 * 0.5 + driverConsistencyScaled / 10 * 0.5) * weatherMult.consistency;
+
+            // --- Lap Time Calculation ---
+            // Base lap time (arbitrary starting point, lower is better)
+            // Modified by track type (simple circuits are generally faster) and overall performance
+            const initialBaseLapTime = 100 * trackMult.baseLapModifier; // Example: start with 100s, adjust by track type
+
+            // Adjust base lap time based on calculated speed. Higher speed = lower lap time.
+            // Speed is scaled from 0-1, so 1 means fastest, 0 means slowest.
+            const effectiveLapTimeBase = initialBaseLapTime * (1 - (baseSpeed * 0.5)); // Reduce lap time by up to 50% based on speed
+
+            // Introduce random variation based on consistency.
+            // Higher consistency (closer to 1.0) means smaller variation.
+            // Lower consistency (closer to 0.0) means larger variation.
+            const maxVariation = 5 * (1 - consistencyFactor); // Max 5s variation for 0 consistency, 0s for 1.0 consistency
+            const lapTimeRandomVariation = (Math.random() - 0.5) * 2 * maxVariation; // Random value between -maxVariation and +maxVariation
+
+            const avgLapTime = Math.max(45, effectiveLapTimeBase + lapTimeRandomVariation); // Ensure min lap time
+
+            const totalTime = avgLapTime * raceDistance;
+
+            return {
+                speed: baseSpeed, // Normalized speed
+                consistency: consistencyFactor, // Normalized consistency
+                reliability: carReliability, // Car reliability
+                avgLapTime: avgLapTime,
+                totalTime: totalTime
+            };
+        }
+
+        /**
+         * Calculates the DNF (Did Not Finish) probability for a given driver.
+         * @param {object} driver - The driver object.
+         * @param {string} trackType - The type of track.
+         * @param {string} weather - The weather condition.
+         * @param {number} developmentRounds - Number of development rounds applied to cars.
+         * @returns {object} An object containing mechanical, driver error, and total DNF probabilities.
+         */
+        function calculateDNFProbability(driver, trackType, weather, developmentRounds = 0) {
+            const car = carData[driver.carModel];
+            const weatherMult = weatherEffects[weather];
+            
+            const devBonus = 1 + (developmentRounds * 0.02);
+            const finalReliability = car.reliability * devBonus;
+
+            // Mechanical failure: Higher reliability = lower chance. Formula adjusted to meet ~34% DNF target.
+            // A higher finalReliability (e.g., 1.4) should result in a low failure rate.
+            // Scaled reliability to 0-20, higher means lower chance
+            const mechanicalFailureRate = Math.max(0.01, (0.40 - (finalReliability / 20 * 0.35)) * (1 / weatherMult.reliability));
+
+            // Driver error: Based on normalized consistency (0-10 scale) and traits
+            const driverConsistencyScaled = (driver.consistency + 4) / 8 * 10; // 0 (worst) to 10 (best)
+            // A high consistency (e.g., 10) should result in a low error rate.
+            const driverErrorRate = Math.max(0.01, 0.18 - (driverConsistencyScaled / 10 * 0.15));
+            
+            const traitPenalty = driver.traits.includes('Aggressive') || driver.traits.includes('Hothead') ? 0.04 : 
+                               (driver.traits.includes('Inconsistent') || driver.traits.includes('Erratic')) ? 0.03 : 
+                               (driver.traits.includes('Overdriver') ? 0.02 : 0);
+            
+            const totalDriverError = (driverErrorRate + traitPenalty) * (1 / weatherMult.consistency);
+            
+            return {
+                mechanical: mechanicalFailureRate,
+                driverError: totalDriverError,
+                total: mechanicalFailureRate + totalDriverError
+            };
+        }
+
+        /**
+         * Simulates a single F1 race.
+         */
+        function simulateRace() {
+            const trackType = document.getElementById('trackType').value;
+            const weather = document.getElementById('weather').value;
+            // Read value from input field, not select
+            const raceDistance = parseInt(document.getElementById('raceDistance').value);
+            const developmentRounds = parseInt(document.getElementById('devRounds').value);
+            const driverSelection = document.getElementById('driverSelection').value;
+
+            // Basic validation for raceDistance
+            if (isNaN(raceDistance) || raceDistance < 1) {
+                alert("Please enter a valid number of laps (minimum 1).");
+                return;
+            }
+            
+            // Filter drivers based on selection
+            let selectedDrivers = [];
+            switch(driverSelection) {
+                case 'main':
+                    selectedDrivers = drivers.filter(d => d.status === 'Main');
+                    break;
+                case 'all': // Changed from 'all' to 'main-reserves' for clarity
+                    selectedDrivers = drivers.filter(d => d.status === 'Main' || d.status === 'Reserve');
+                    break;
+                case 'main-privateers':
+                    selectedDrivers = drivers.filter(d => d.status === 'Main' || d.status === 'Privateer');
+                    break;
+                case 'everyone': // Changed from 'privateers' to 'everyone' for clarity
+                    selectedDrivers = [...drivers]; // All drivers including privateers and reserves
+                    break;
+            }
+            
+            document.getElementById('results').style.display = 'grid';
+            
+            // Calculate performance for each driver
+            const raceResults = selectedDrivers.map(driver => {
+                const performance = calculateDriverPerformance(driver, trackType, weather, developmentRounds, raceDistance);
+                const dnfProb = calculateDNFProbability(driver, trackType, weather, developmentRounds);
+                
+                // Determine if DNF occurs
+                const dnfRoll = Math.random();
+                let dnfStatus = null;
+                let dnfLap = null;
+                
+                if (dnfRoll < dnfProb.total) {
+                    dnfLap = Math.floor(Math.random() * raceDistance) + 1;
+                    if (dnfRoll < dnfProb.mechanical) {
+                        dnfStatus = 'mechanical';
+                    } else {
+                        dnfStatus = 'driver-error';
+                    }
+                }
+                
+                return {
+                    ...driver,
+                    performance,
+                    dnfProb,
+                    avgLapTime: performance.avgLapTime, // Correctly assigning from performance object
+                    totalTime: performance.totalTime,   // Correctly assigning from performance object
+                    dnfStatus,
+                    dnfLap,
+                    finished: !dnfStatus
+                };
+            });
+            
+            // Sort by finishing position
+            raceResults.sort((a, b) => {
+                if (a.finished && !b.finished) return -1; // Finishers before DNFs
+                if (!a.finished && b.finished) return 1; // DNFs after finishers
+                if (!a.finished && !b.finished) { // Both DNF: later DNF is better
+                    return b.dnfLap - a.dnfLap; 
+                }
+                return a.totalTime - b.totalTime; // Finishers: faster total time is better
+            });
+            
+            displayResults(raceResults, trackType, weather, raceDistance, driverSelection);
+        }
+
+        /**
+         * Displays the race results, DNF analysis, and performance analysis.
+         * @param {Array<object>} results - The sorted race results.
+         * @param {string} trackType - The type of track.
+         * @param {string} weather - The weather condition.
+         * @param {number} raceDistance - The total race distance in laps.
+         * @param {string} driverSelection - The driver selection mode.
+         */
+        function displayResults(results, trackType, weather, raceDistance, driverSelection) {
+            // Race results
+            const resultsHtml = results.map((driver, index) => {
+                const position = index + 1;
+                const timeDisplay = driver.finished ? 
+                    `${Math.floor(driver.totalTime / 60)}:${(driver.totalTime % 60).toFixed(2).padStart(5, '0')}` :
+                    `DNF (Lap ${driver.dnfLap})`;
+                
+                const cssClass = driver.finished ? 'position' : 
+                    driver.dnfStatus === 'mechanical' ? 'position dnf mechanical' : 'position dnf driver-error';
+                
+                const statusIndicator = driver.status === 'Privateer' ? ' 🏴‍☠️' : 
+                                      driver.status === 'Reserve' ? ' 🔄' : '';
+                
+                return `
+                    <div class="${cssClass}">
+                        <span>${position}. #${driver.car} ${driver.name}${statusIndicator} (${driver.carModel})</span>
+                        <span>${timeDisplay}</span>
+                    </div>
+                `;
+            }).join('');
+            
+            document.getElementById('raceResultsList').innerHTML = resultsHtml;
+            
+            // DNF Analysis
+            const dnfs = results.filter(r => !r.finished);
+            const mechanicalDNFs = dnfs.filter(r => r.dnfStatus === 'mechanical').length;
+            const driverErrorDNFs = dnfs.filter(r => r.dnfStatus === 'driver-error').length;
+            const totalDNFs = dnfs.length;
+            const dnfRate = results.length > 0 ? (totalDNFs / results.length * 100).toFixed(1) : 0;
+            
+            const entryBreakdown = {
+                main: results.filter(r => r.status === 'Main').length,
+                reserve: results.filter(r => r.status === 'Reserve').length,
+                privateer: results.filter(r => r.status === 'Privateer').length
+            };
+            
+            const dnfAnalysisHtml = `
+                <div>Total Entries: ${results.length}</div>
+                <div>Main Drivers: ${entryBreakdown.main} | Reserves: ${entryBreakdown.reserve} | Privateers: ${entryBreakdown.privateer}</div>
+                <div>Total DNFs: ${totalDNFs}/${results.length} (${dnfRate}%)</div>
+                <div>Mechanical Failures: ${mechanicalDNFs} (${totalDNFs > 0 ? (mechanicalDNFs/totalDNFs*100).toFixed(1) : 0}%)</div>
+                <div>Driver Errors: ${driverErrorDNFs} (${totalDNFs > 0 ? (driverErrorDNFs/totalDNFs*100).toFixed(1) : 0}%)</div>
+                <div class="weather-indicator ${weather}">Weather: ${weather.toUpperCase()}</div>
+                <div>Track: ${trackType.charAt(0).toUpperCase() + trackType.slice(1)} Circuit</div>
+            `;
+            
+            document.getElementById('dnfAnalysis').innerHTML = dnfAnalysisHtml;
+            
+            // Performance Analysis
+            const finishers = results.filter(r => r.finished);
+            const fastest = finishers.length > 0 ? finishers[0] : null;
+            const slowest = finishers.length > 0 ? finishers[finishers.length - 1] : null;
+            
+            let performanceHtml = `<div>Race Distance: ${raceDistance} laps</div>`;
+            
+            if (fastest) {
+                const fastestLap = fastest.avgLapTime.toFixed(2);
+                performanceHtml += `<div>Fastest Average Lap: ${fastestLap}s (${fastest.name})</div>`;
+            }
+            
+            if (slowest && fastest) {
+                const timeDiff = slowest.totalTime - fastest.totalTime;
+                performanceHtml += `<div>Winning Margin: ${timeDiff.toFixed(2)}s</div>`;
+            }
+            
+            // Team/Car performance analysis
+            const teamPerformance = {};
+            results.forEach(driver => {
+                const car = carData[driver.carModel];
+                const teamName = car.team;
+                if (!teamPerformance[teamName]) {
+                    teamPerformance[teamName] = {
+                        drivers: [],
+                        finishers: 0,
+                        bestPosition: null,
+                        carModel: driver.carModel
+                    };
+                }
+                teamPerformance[teamName].drivers.push(driver);
+                if (driver.finished) {
+                    teamPerformance[teamName].finishers++;
+                    const position = results.indexOf(driver) + 1;
+                    if (!teamPerformance[teamName].bestPosition || position < teamPerformance[teamName].bestPosition) {
+                        teamPerformance[teamName].bestPosition = position;
+                    }
+                }
+            });
+            
+            performanceHtml += '<h3>Team Performance:</h3>';
+            Object.entries(teamPerformance).forEach(([teamName, data]) => {
+                const bestPos = data.bestPosition ? `P${data.bestPosition}` : 'DNF';
+                const finishRate = data.drivers.length > 0 ? ((data.finishers / data.drivers.length) * 100).toFixed(1) : 0;
+                performanceHtml += `<div>${teamName} (${data.carModel}): Best ${bestPos}, ${data.finishers}/${data.drivers.length} finished (${finishRate}%)</div>`;
+            });
+            
+            document.getElementById('performanceAnalysis').innerHTML = performanceHtml;
+        }
+
+        // Initialize stats display
+        function displayStats() {
+            const mainDrivers = drivers.filter(d => d.status === 'Main');
+            const reserveDrivers = drivers.filter(d => d.status === 'Reserve');
+            const privateers = drivers.filter(d => d.status === 'Privateer');
+            
+            const statsHtml = mainDrivers.map(driver => { // Display all main drivers for stats
+                const car = carData[driver.carModel];
+                return `
+                    <div class="stat-card">
+                        <h3>#${driver.car} ${driver.name}</h3>
+                        <div>Car: ${driver.carModel} (${car.team})</div>
+                        <div>Traits: ${driver.traits.join(', ')}</div>
+                        <div>Pace: ${driver.pace > 0 ? '+' : ''}${driver.pace}</div>
+                        <div>Consistency: ${driver.consistency > 0 ? '+' : ''}${driver.consistency}</div>
+                        <div>Car Power: ${car.power}/20</div>
+                        <div>Car Cornering: ${car.cornering}/20</div>
+                        <div>Car Reliability: ${car.reliability}/20</div>
+                    </div>
+                `;
+            }).join('');
+            
+            const summaryCard = `
+                <div class="stat-card">
+                    <h3>📊 Driver Summary</h3>
+                    <div>Total Drivers: ${drivers.length}</div>
+                    <div>Main Drivers: ${mainDrivers.length}</div>
+                    <div>Reserve Drivers: ${reserveDrivers.length}</div>
+                    <div>Privateers: ${privateers.length}</div>
+                    <div style="margin-top: 10px; font-size: 12px;">
+                        <div><strong>Selection Options:</strong></div>
+                        <div>🏁 Main Only (${mainDrivers.length})</div>
+                        <div>🔄 Main + Reserves (${mainDrivers.length + reserveDrivers.length})</div>
+                        <div>🏴‍☠️ Main + Privateers (${mainDrivers.length + privateers.length})</div>
+                        <div>🌍 Everyone (${drivers.length})</div>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('statsDisplay').innerHTML = statsHtml + summaryCard;
+        }
+
+        // Initialize on page load
+        displayStats();
+    </script>
+</body>
+</html>

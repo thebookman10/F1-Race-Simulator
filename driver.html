@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1950s F1 Race Simulator</title>
+    <!-- Firebase SDK - MUST BE LOADED FROM CDN for HTML -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, getDocs, addDoc, setDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase and Firestore instances
+        window.firebaseApp = null;
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false; // Flag to ensure auth is ready before Firestore ops
+        
+        // Global variable to store drivers fetched from Firestore
+        window.currentDrivers = [];
+        window.qualifiedDrivers = []; // Stores drivers who qualified for the race
+
+        // Mandatory Firebase configuration and authentication token
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Shared Data (moved here to prevent redeclaration errors) ---
+        const carData = {
+            'AL-33': { power: 1.2, cornering: 0.6, reliability: 0.4, focus: 'Reliability', team: 'AIA' },
+            'LW-15': { power: 2.3, cornering: 1.5, reliability: 0.8, focus: 'Balanced', team: 'Lighting Wings' },
+            'RZ-35': { power: 2.5, cornering: 0.4, reliability: 0.6, focus: 'Balanced', team: 'RAZ' },
+            'RS-54': { power: 2.6, cornering: 2.6, reliability: 0.8, focus: 'Cornering', team: 'Red Herring' },
+            'SA-53': { power: 2.2, cornering: 2.0, reliability: 0.9, focus: 'Balanced', team: 'Saint Ard' },
+            'VNR-01': { power: 1.2, cornering: 0.8, reliability: 0.1, focus: 'Balanced', team: 'VNR' },
+            'WZ-12': { power: 2.2, cornering: 0.6, reliability: 1.4, focus: 'Balanced', team: 'WHI Dynamics' }
+        };
+
+        const trackMultipliers = {
+            street: { power: 0.6, cornering: 1.4, reliability: 1.0, baseLapModifier: 1.1 }, // Slower overall
+            balanced: { power: 1.0, cornering: 1.0, reliability: 1.0, baseLapModifier: 1.0 }, // Normal
+            simple: { power: 1.4, cornering: 0.6, reliability: 1.0, baseLapModifier: 0.9 } // Faster overall
+        };
+
+        const weatherEffects = {
+            dry: { pace: 1.0, reliability: 1.0, consistency: 1.0, rainBonus: 1.0 },
+            wet: { pace: 0.85, reliability: 0.9, consistency: 0.7, rainBonus: 1.15 } // Wet weather specialist gain more pace in wet
+        };
+
+
+        // --- Utility Functions for Message Box ---
+        function showMessageBox(message) {
+            const msgBox = document.getElementById('messageBox');
+            const msgText = document.getElementById('messageText');
+            if (msgBox && msgText) {
+                msgText.textContent = message;
+                msgBox.style.display = 'flex';
+            } else {
+                console.warn("Message box elements not found. Message: ", message);
+            }
+        }
+        window.showMessageBox = showMessageBox; // Expose to window
+
+        function hideMessageBox() {
+            const msgBox = document.getElementById('messageBox');
+            if (msgBox) {
+                msgBox.style.display = 'none';
+            }
+        }
+        window.hideMessageBox = hideMessageBox; // Expose to window
+
+
+        // Function to update the displayed user ID
+        function updateCurrentUserIdDisplay() {
+            const userIdDisplay = document.getElementById('currentUserId');
+            if (userIdDisplay && window.userId) {
+                userIdDisplay.textContent = `User ID: ${window.userId}`;
+                userIdDisplay.style.color = '#00ff00';
+            } else if (userIdDisplay) {
+                userIdDisplay.textContent = 'User ID: Not authenticated';
+                userIdDisplay.style.color = '#ff0000';
+            }
+        }
+        window.updateCurrentUserIdDisplay = updateCurrentUserIdDisplay; // Expose to window
+
+        /**
+         * Loads drivers from Firestore in real-time.
+         */
+        async function loadDriversFromFirestore() {
+            if (!window.isAuthReady) {
+                console.log("Firestore: Authentication not ready, retrying loadDriversFromFirestore...");
+                setTimeout(window.loadDriversFromFirestore, 500); // Retry after 500ms
+                return;
+            }
+
+            if (!window.db || !window.userId) {
+                console.error("Firestore not initialized or userId not available.");
+                document.getElementById('firebaseStatus').textContent = 'Firebase: Not connected. Please refresh.';
+                document.getElementById('firebaseStatus').style.color = 'red';
+                return;
+            }
+            
+            const driversCol = collection(window.db, `artifacts/${appId}/users/${window.userId}/drivers`);
+
+            // Set up a real-time listener
+            onSnapshot(driversCol, (snapshot) => {
+                window.currentDrivers = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data()
+                }));
+                console.log("Firestore: Drivers updated in real-time.", window.currentDrivers);
+                window.displayDriverList(); // Call global function
+                window.displayStats(); // Call global function
+            }, (error) => {
+                console.error("Error listening to drivers:", error);
+                window.showMessageBox("Error loading drivers: " + error.message);
+            });
+        }
+        window.loadDriversFromFirestore = loadDriversFromFirestore; // Expose to window
+
+        /**
+         * Populates the car model dropdown in the driver management form.
+         */
+        function populateCarModelDropdown() {
+            const select = document.getElementById('driverCarModel');
+            select.innerHTML = ''; // Clear existing options
+            for (const model in carData) {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = `${model} (${carData[model].team})`;
+                select.appendChild(option);
+            }
+        }
+        window.populateCarModelDropdown = populateCarModelDropdown; // Expose to window
+
+
+        /**
+         * Saves (adds or updates) a driver to Firestore.
+         */
+        async function saveDriver() {
+            if (!window.isAuthReady || !window.db || !window.userId) {
+                window.showMessageBox("Firestore not ready. Please wait a moment and try again.");
+                return;
+            }
+
+            const id = document.getElementById('currentDriverId').value;
+            const name = document.getElementById('driverName').value.trim();
+            const carModel = document.getElementById('driverCarModel').value;
+            const nationality = document.getElementById('driverNationality').value.trim();
+            const traits = document.getElementById('driverTraits').value.split(',').map(t => t.trim()).filter(t => t !== '');
+            const pace = parseInt(document.getElementById('driverPace').value);
+            const consistency = parseInt(document.getElementById('driverConsistency').value);
+            const status = document.getElementById('driverStatus').value;
+            // Get the highest current car number and increment it for a new driver
+            // Ensure `d.car` is treated as 0 if undefined to avoid NaN issues
+            const carNumbers = window.currentDrivers.map(d => d.car || 0);
+            const carNumber = carNumbers.length > 0 ? Math.max(...carNumbers) + 1 : 1;
+
+
+            if (!name || !carModel || isNaN(pace) || isNaN(consistency)) {
+                window.showMessageBox("Please fill in all required driver fields.");
+                return;
+            }
+
+            const driverData = {
+                name,
+                carModel,
+                nationality,
+                traits,
+                pace,
+                consistency,
+                status,
+                car: carNumber // Assign a new unique car number for new drivers
+            };
+
+            const driversCol = collection(window.db, `artifacts/${appId}/users/${window.userId}/drivers`);
+
+            try {
+                if (id) {
+                    // Update existing driver
+                    await setDoc(doc(driversCol, id), driverData, { merge: true });
+                    window.showMessageBox("Driver updated successfully!");
+                } else {
+                    // Add new driver
+                    await addDoc(driversCol, driverData);
+                    window.showMessageBox("Driver added successfully!");
+                }
+                window.clearDriverForm();
+            } catch (e) {
+                console.error("Error saving driver: ", e);
+                window.showMessageBox("Error saving driver: " + e.message);
+            }
+        }
+        window.saveDriver = saveDriver; // Expose to window
+
+        /**
+         * Deletes a driver from Firestore.
+         * @param {string} driverId - The ID of the driver to delete.
+         */
+        async function deleteDriver(driverId) {
+            if (!window.isAuthReady || !window.db || !window.userId) {
+                window.showMessageBox("Firestore not ready. Please wait a moment and try again.");
+                return;
+            }
+
+            const driversCol = collection(window.db, `artifacts/${appId}/users/${window.userId}/drivers`);
+            const driverRef = doc(driversCol, driverId);
+
+            try {
+                // Use a custom confirmation dialog instead of alert/confirm
+                const confirmDelete = await new Promise(resolve => {
+                    const confirmBox = document.createElement('div');
+                    confirmBox.className = 'message-box';
+                    confirmBox.innerHTML = `
+                        <p>Are you sure you want to delete this driver?</p>
+                        <div>
+                            <button id="confirmYes">Yes</button>
+                            <button id="confirmNo">No</button>
+                        </div>
+                    `;
+                    document.body.appendChild(confirmBox);
+                    confirmBox.style.display = 'flex'; // Show it
+
+                    document.getElementById('confirmYes').onclick = () => {
+                        confirmBox.remove();
+                        resolve(true);
+                    };
+                    document.getElementById('confirmNo').onclick = () => {
+                        confirmBox.remove();
+                        resolve(false);
+                    };
+                });
+
+                if (confirmDelete) {
+                    await deleteDoc(driverRef);
+                    window.showMessageBox("Driver deleted successfully!");
+                }
+            } catch (e) {
+                console.error("Error deleting driver: ", e);
+                window.showMessageBox("Error deleting driver: " + e.message);
+            }
+        }
+        window.deleteDriver = deleteDriver; // Expose to window
+
+
+        /**
+         * Populates the form for editing an existing driver.
+         * @param {string} driverId - The ID of the driver to edit.
+         */
+        function editDriver(driverId) {
+            const driver = window.currentDrivers.find(d => d.id === driverId);
+            if (driver) {
+                document.getElementById('currentDriverId').value = driver.id;
+                document.getElementById('driverName').value = driver.name;
+                document.getElementById('driverCarModel').value = driver.carModel;
+                document.getElementById('driverNationality').value = driver.nationality;
+                document.getElementById('driverTraits').value = driver.traits.join(', ');
+                document.getElementById('driverPace').value = driver.pace;
+                document.getElementById('driverConsistency').value = driver.consistency;
+                document.getElementById('driverStatus').value = driver.status;
+            }
+        }
+        window.editDriver = editDriver; // Expose to window
+
+
+        /**
+         * Clears the driver management form.
+         */
+        function clearDriverForm() {
+            document.getElementById('currentDriverId').value = '';
+            document.getElementById('driverName').value = '';
+            document.getElementById('driverCarModel').value = Object.keys(carData)[0]; // Set to first car model
+            document.getElementById('driverNationality').value = '';
+            document.getElementById('driverTraits').value = '';
+            document.getElementById('driverPace').value = '0';
+            document.getElementById('driverConsistency').value = '0';
+            document.getElementById('driverStatus').value = 'Main';
+        }
+        window.clearDriverForm = clearDriverForm; // Expose to window
+
+
+        /**
+         * Displays the list of current drivers in the management section.
+         */
+        function displayDriverList() {
+            const listDiv = document.getElementById('driverList');
+            if (!listDiv) {
+                console.warn("Driver list element not found.");
+                return;
+            }
+            listDiv.innerHTML = ''; // Clear current list
+
+            if (window.currentDrivers.length === 0) {
+                listDiv.innerHTML = '<p style="text-align: center; color: #666;">No drivers added yet. Use the form above to add some!</p>';
+                return;
+            }
+
+            window.currentDrivers.forEach(driver => {
+                const driverElement = document.createElement('div');
+                driverElement.className = 'driver-list-item';
+                driverElement.innerHTML = `
+                    <span>#${driver.car} ${driver.name} (${driver.carModel}) - ${driver.status}</span>
+                    <div class="actions">
+                        <button onclick="window.editDriver('${driver.id}')">Edit</button>
+                        <button onclick="window.deleteDriver('${driver.id}')">Delete</button>
+                    </div>
+                `;
+                listDiv.appendChild(driverElement);
+            });
+        }
+        window.displayDriverList = displayDriverList; // Expose to window
+
+
+        // --- Simulation Core Logic (Reused/Adapted) ---
+
+        /**
+         * Calculates a driver's performance metrics for a given race.
+         * @param {object} driver - The driver object.
+         * @param {string} trackType - The type of track ('street', 'balanced', 'simple').
+         * @param {string} weather - The weather condition ('dry', 'wet').
+         * @param {number} developmentRounds - Number of development rounds applied to cars.
+         * @param {number} raceDistance - Total number of laps for the race.
+         * @param {boolean} isQualifying - True if calculating for qualifying, false for race.
+         * @returns {object} An object containing calculated speed, consistency, reliability, avgLapTime, and totalTime (or qualTime).
+         */
+        function calculateDriverPerformance(driver, trackType, weather, developmentRounds = 0, raceDistance, isQualifying = false) {
+            const car = carData[driver.carModel];
+            if (!car) {
+                console.warn(`Car model ${driver.carModel} not found for driver ${driver.name}. Skipping performance calculation.`);
+                return { speed: 0.1, consistency: 0.1, reliability: 0.1, avgLapTime: 9999, totalTime: 9999 }; // Return fallback
+            }
+
+            const trackMult = trackMultipliers[trackType];
+            const weatherMult = weatherEffects[weather];
+
+            // Apply development rounds bonus to car stats
+            const devBonus = 1 + (developmentRounds * 0.02); // Each round adds 2%
+            const carPower = car.power * devBonus;
+            const carCornering = car.cornering * devBonus;
+            const carReliability = car.reliability * devBonus;
+
+            // Calculate car performance based on track type
+            const carPerformance = (carPower * trackMult.power) + (carCornering * trackMult.cornering);
+
+            // Calculate driver pace and consistency, scaled from -4 to +4 to a 0-10 range for easier use
+            const driverPaceScaled = (driver.pace + 4) / 8 * 10; // 0 (worst) to 10 (best)
+            const driverConsistencyScaled = (driver.consistency + 4) / 8 * 10; // 0 (worst) to 10 (best)
+
+            // Adjust pace for 'Rain Master' trait in wet conditions
+            let rainBonus = 1.0;
+            if (weather === 'wet' && driver.traits.includes('Rain Master')) {
+                rainBonus = weatherMult.rainBonus; // Gives a bonus in wet conditions
+            }
+
+            // Calculate final speed (higher is better, aiming for a base of 0-10 scale)
+            // Base speed influenced by car performance (60%) and driver pace (40%)
+            const baseSpeed = ((carPerformance / 20 * 0.6) + (driverPaceScaled / 10 * 0.4)) * weatherMult.pace * rainBonus; // Normalize car performance to 0-1 range
+
+            // Calculate consistency factor (higher is better, less variation)
+            const consistencyFactor = (carReliability / 20 * 0.5 + driverConsistencyScaled / 10 * 0.5) * weatherMult.consistency;
+
+            // --- Lap Time Calculation ---
+            // Base lap time (arbitrary starting point, lower is better)
+            // Modified by track type (simple circuits are generally faster) and overall performance
+            const initialBaseLapTime = 100 * trackMult.baseLapModifier; // Example: start with 100s, adjust by track type
+
+            // Adjust base lap time based on calculated speed. Higher speed = lower lap time.
+            // Speed is scaled from 0-1, so 1 means fastest, 0 means slowest.
+            const effectiveLapTimeBase = initialBaseLapTime * (1 - (baseSpeed * 0.5)); // Reduce lap time by up to 50% based on speed
+
+            // Introduce random variation based on consistency.
+            // For qualifying, less variation is expected (a single best lap attempt)
+            const maxVariation = isQualifying ? 1 * (1 - consistencyFactor) : 5 * (1 - consistencyFactor);
+            const lapTimeRandomVariation = (Math.random() - 0.5) * 2 * maxVariation; // Random value between -maxVariation and +maxVariation
+
+            const avgLapTime = Math.max(45, effectiveLapTimeBase + lapTimeRandomVariation); // Ensure min lap time
+
+            const totalTime = avgLapTime * raceDistance; // For race distance
+            const qualTime = avgLapTime; // For qualifying, it's just one lap
+
+            return {
+                speed: baseSpeed, // Normalized speed
+                consistency: consistencyFactor, // Normalized consistency
+                reliability: carReliability, // Car reliability
+                avgLapTime: avgLapTime,
+                totalTime: totalTime,
+                qualTime: qualTime // Specific for qualifying
+            };
+        }
+
+        /**
+         * Calculates the DNF (Did Not Finish) probability for a given driver.
+         * @param {object} driver - The driver object.
+         * @param {string} trackType - The type of track.
+         * @param {string} weather - The weather condition.
+         * @param {number} developmentRounds - Number of development rounds applied to cars.
+         * @returns {object} An object containing mechanical, driver error, and total DNF probabilities.
+         */
+        function calculateDNFProbability(driver, trackType, weather, developmentRounds = 0) {
+            const car = carData[driver.carModel];
+            if (!car) {
+                return { mechanical: 1, driverError: 1, total: 2 }; // High DNF if car data is missing
+            }
+            const weatherMult = weatherEffects[weather];
+            
+            const devBonus = 1 + (developmentRounds * 0.02);
+            const finalReliability = car.reliability * devBonus;
+
+            // Mechanical failure: Higher reliability = lower chance.
+            const mechanicalFailureRate = Math.max(0.01, (0.40 - (finalReliability / 20 * 0.35)) * (1 / weatherMult.reliability));
+
+            // Driver error: Based on normalized consistency (0-10 scale) and traits
+            const driverConsistencyScaled = (driver.consistency + 4) / 8 * 10;
+            const driverErrorRate = Math.max(0.01, 0.18 - (driverConsistencyScaled / 10 * 0.15));
+            
+            const traitPenalty = driver.traits.includes('Aggressive') || driver.traits.includes('Hothead') ? 0.04 : 
+                               (driver.traits.includes('Inconsistent') || driver.traits.includes('Erratic')) ? 0.03 : 
+                               (driver.traits.includes('Overdriver') ? 0.02 : 0);
+            
+            const totalDriverError = (driverErrorRate + traitPenalty) * (1 / weatherMult.consistency);
+            
+            return {
+                mechanical: mechanicalFailureRate,
+                driverError: totalDriverError,
+                total: mechanicalFailureRate + totalDriverError
+            };
+        }
+
+        // --- Qualifying Simulation ---
+
+        /**
+         * Simulates a qualifying session.
+         */
+        function simulateQualifying() {
+            // Clear previous race results
+            document.getElementById('raceResultsSection').style.display = 'none';
+
+            const trackType = document.getElementById('trackType').value;
+            const weather = document.getElementById('weather').value;
+            const developmentRounds = parseInt(document.getElementById('devRounds').value);
+            const driverSelection = document.getElementById('driverSelection').value;
+
+            // Filter drivers based on selection, using currentDrivers from Firestore
+            let driversForQualifying = [];
+            switch(driverSelection) {
+                case 'main':
+                    driversForQualifying = window.currentDrivers.filter(d => d.status === 'Main');
+                    break;
+                case 'all':
+                    driversForQualifying = window.currentDrivers.filter(d => d.status === 'Main' || d.status === 'Reserve');
+                    break;
+                case 'main-privateers':
+                    driversForQualifying = window.currentDrivers.filter(d => d.status === 'Main' || d.status === 'Privateer');
+                    break;
+                case 'everyone':
+                    driversForQualifying = [...window.currentDrivers];
+                    break;
+            }
+
+            if (driversForQualifying.length === 0) {
+                window.showMessageBox("No drivers selected for qualifying. Please add drivers or change selection criteria.");
+                return;
+            }
+
+            const qualifyingResults = driversForQualifying.map(driver => {
+                const performance = calculateDriverPerformance(driver, trackType, weather, developmentRounds, 1, true); // 1 lap for qualifying
+                return {
+                    ...driver,
+                    qualTime: performance.qualTime,
+                    finishedQualifying: true // Assume everyone finishes qualifying lap
+                };
+            });
+
+            // Sort by fastest qualifying time
+            qualifyingResults.sort((a, b) => a.qualTime - b.qualTime);
+
+            // Display qualifying results
+            displayQualifyingResults(qualifyingResults, trackType, weather);
+
+            // Select top 24 for the race
+            window.qualifiedDrivers = qualifyingResults.slice(0, 24);
+            if (window.qualifiedDrivers.length > 0) {
+                 window.showMessageBox(`Qualifying complete! Top ${window.qualifiedDrivers.length} drivers qualified for the race.`);
+            } else {
+                window.showMessageBox("No drivers qualified for the race. Check your driver selection and stats.");
+            }
+        }
+        window.simulateQualifying = simulateQualifying; // Expose to window
+
+
+        /**
+         * Displays the qualifying results.
+         * @param {Array<object>} results - The sorted qualifying results.
+         * @param {string} trackType - The type of track.
+         * @param {string} weather - The weather condition.
+         */
+        function displayQualifyingResults(results, trackType, weather) {
+            document.getElementById('qualifyingResults').style.display = 'block';
+            const listDiv = document.getElementById('qualifyingResultsList');
+            if (!listDiv) {
+                 console.warn("Qualifying results list element not found.");
+                 return;
+            }
+            listDiv.innerHTML = '';
+
+            results.forEach((driver, index) => {
+                const position = index + 1;
+                const timeDisplay = driver.qualTime.toFixed(3);
+                const isQualified = position <= 24;
+                const cssClass = isQualified ? 'position' : 'position dnf'; // Use dnf class for non-qualified visually
+                
+                const statusIndicator = driver.status === 'Privateer' ? ' 🏴‍☠️' : 
+                                      driver.status === 'Reserve' ? ' 🔄' : '';
+
+                listDiv.innerHTML += `
+                    <div class="${cssClass}">
+                        <span>${position}. #${driver.car} ${driver.name}${statusIndicator} (${driver.carModel})</span>
+                        <span>${timeDisplay}s ${isQualified ? '' : '(NC)'}</span>
+                    </div>
+                `;
+            });
+             const weatherIndicator = document.createElement('div');
+            weatherIndicator.className = `weather-indicator ${weather}`;
+            weatherIndicator.textContent = `Weather: ${weather.toUpperCase()} | Track: ${trackType.charAt(0).toUpperCase() + trackType.slice(1)} Circuit`;
+            listDiv.insertBefore(weatherIndicator, listDiv.firstChild); // Add weather/track info at the top
+        }
+
+
+        // --- Race Simulation ---
+
+        /**
+         * Simulates a single F1 race.
+         */
+        function simulateRace() {
+            // Hide qualifying results
+            document.getElementById('qualifyingResults').style.display = 'none';
+            document.getElementById('raceResultsSection').style.display = 'grid';
+
+            const trackType = document.getElementById('trackType').value;
+            const weather = document.getElementById('weather').value;
+            const raceDistance = parseInt(document.getElementById('raceDistance').value);
+            const developmentRounds = parseInt(document.getElementById('devRounds').value);
+            
+            // Use qualified drivers if a qualifying session has been run, otherwise use selected drivers
+            const driversForRace = window.qualifiedDrivers.length > 0 ? window.qualifiedDrivers : (() => {
+                const driverSelection = document.getElementById('driverSelection').value;
+                switch(driverSelection) {
+                    case 'main': return window.currentDrivers.filter(d => d.status === 'Main');
+                    case 'all': return window.currentDrivers.filter(d => d.status === 'Main' || d.status === 'Reserve');
+                    case 'main-privateers': return window.currentDrivers.filter(d => d.status === 'Main' || d.status === 'Privateer');
+                    case 'everyone': return [...window.currentDrivers];
+                    default: return [];
+                }
+            })();
+
+            if (isNaN(raceDistance) || raceDistance < 1) {
+                window.showMessageBox("Please enter a valid number of laps (minimum 1).");
+                return;
+            }
+            
+            if (driversForRace.length === 0) {
+                window.showMessageBox("No drivers available for the race. Please run qualifying or ensure drivers are added/selected.");
+                return;
+            }
+
+            const raceResults = driversForRace.map(driver => {
+                const performance = calculateDriverPerformance(driver, trackType, weather, developmentRounds, raceDistance, false);
+                const dnfProb = calculateDNFProbability(driver, trackType, weather, developmentRounds);
+                
+                // Simulate DNF
+                const dnfRoll = Math.random();
+                let dnfStatus = null;
+                let dnfLap = null;
+                
+                if (dnfRoll < dnfProb.total) {
+                    dnfLap = Math.floor(Math.random() * raceDistance) + 1;
+                    if (dnfRoll < dnfProb.mechanical) {
+                        dnfStatus = 'mechanical';
+                    } else {
+                        dnfStatus = 'driver-error';
+                    }
+                }
+                
+                return {
+                    ...driver,
+                    performance,
+                    dnfProb,
+                    avgLapTime: performance.avgLapTime,
+                    totalTime: performance.totalTime,
+                    dnfStatus,
+                    dnfLap,
+                    finished: !dnfStatus
+                };
+            });
+            
+            raceResults.sort((a, b) => {
+                if (a.finished && !b.finished) return -1;
+                if (!a.finished && b.finished) return 1;
+                if (!a.finished && !b.finished) {
+                    return b.dnfLap - a.dnfLap; 
+                }
+                return a.totalTime - b.totalTime;
+            });
+            
+            displayResults(raceResults, trackType, weather, raceDistance);
+            window.qualifiedDrivers = []; // Reset qualified drivers after race
+        }
+        window.simulateRace = simulateRace; // Expose to window
+
+
+        /**
+         * Displays the race results, DNF analysis, and performance analysis.
+         * @param {Array<object>} results - The sorted race results.
+         * @param {string} trackType - The type of track.
+         * @param {string} weather - The weather condition.
+         * @param {number} raceDistance - The total race distance in laps.
+         */
+        function displayResults(results, trackType, weather, raceDistance) {
+            // Race results
+            const resultsHtml = results.map((driver, index) => {
+                const position = index + 1;
+                const timeDisplay = driver.finished ? 
+                    `${Math.floor(driver.totalTime / 60)}:${(driver.totalTime % 60).toFixed(2).padStart(5, '0')}` :
+                    `DNF (Lap ${driver.dnfLap})`;
+                
+                const cssClass = driver.finished ? 'position' : 
+                    driver.dnfStatus === 'mechanical' ? 'position dnf mechanical' : 'position dnf driver-error';
+                
+                const statusIndicator = driver.status === 'Privateer' ? ' 🏴‍☠️' : 
+                                      driver.status === 'Reserve' ? ' 🔄' : '';
+                
+                return `
+                    <div class="${cssClass}">
+                        <span>${position}. #${driver.car} ${driver.name}${statusIndicator} (${driver.carModel})</span>
+                        <span>${timeDisplay}</span>
+                    </div>
+                `;
+            }).join('');
+            
+            document.getElementById('raceResultsList').innerHTML = resultsHtml;
+            
+            // DNF Analysis
+            const dnfs = results.filter(r => !r.finished);
+            const mechanicalDNFs = dnfs.filter(r => r.dnfStatus === 'mechanical').length;
+            const driverErrorDNFs = dnfs.filter(r => r.dnfStatus === 'driver-error').length;
+            const totalDNFs = dnfs.length;
+            const dnfRate = results.length > 0 ? (totalDNFs / results.length * 100).toFixed(1) : 0;
+            
+            const entryBreakdown = {
+                main: results.filter(r => r.status === 'Main').length,
+                reserve: results.filter(r => r.status === 'Reserve').length,
+                privateer: results.filter(r => r.status === 'Privateer').length
+            };
+            
+            const dnfAnalysisHtml = `
+                <div>Total Entries: ${results.length}</div>
+                <div>Main Drivers: ${entryBreakdown.main} | Reserves: ${entryBreakdown.reserve} | Privateers: ${entryBreakdown.privateer}</div>
+                <div>Total DNFs: ${totalDNFs}/${results.length} (${dnfRate}%)</div>
+                <div>Mechanical Failures: ${mechanicalDNFs} (${totalDNFs > 0 ? (mechanicalDNFs/totalDNFs*100).toFixed(1) : 0}%)</div>
+                <div>Driver Errors: ${driverErrorDNFs} (${totalDNFs > 0 ? (driverErrorDNFs/totalDNFs*100).toFixed(1) : 0}%)</div>
+                <div class="weather-indicator ${weather}">Weather: ${weather.toUpperCase()}</div>
+                <div>Track: ${trackType.charAt(0).toUpperCase() + trackType.slice(1)} Circuit</div>
+            `;
+            
+            document.getElementById('dnfAnalysis').innerHTML = dnfAnalysisHtml;
+            
+            // Performance Analysis
+            const finishers = results.filter(r => r.finished);
+            const fastest = finishers.length > 0 ? finishers[0] : null;
+            const slowest = finishers.length > 0 ? finishers[finishers.length - 1] : null;
+            
+            let performanceHtml = `<div>Race Distance: ${raceDistance} laps</div>`;
+            
+            if (fastest) {
+                const fastestLap = fastest.avgLapTime.toFixed(2);
+                performanceHtml += `<div>Fastest Average Lap: ${fastestLap}s (${fastest.name})</div>`;
+            }
+            
+            if (slowest && fastest) {
+                const timeDiff = slowest.totalTime - fastest.totalTime;
+                performanceHtml += `<div>Winning Margin: ${timeDiff.toFixed(2)}s</div>`;
+            }
+            
+            // Team/Car performance analysis
+            const teamPerformance = {};
+            results.forEach(driver => {
+                const car = carData[driver.carModel];
+                const teamName = car ? car.team : 'Unknown Team'; // Handle missing car data gracefully
+                if (!teamPerformance[teamName]) {
+                    teamPerformance[teamName] = {
+                        drivers: [],
+                        finishers: 0,
+                        bestPosition: null,
+                        carModel: driver.carModel // Store car model for reference
+                    };
+                }
+                teamPerformance[teamName].drivers.push(driver);
+                if (driver.finished) {
+                    teamPerformance[teamName].finishers++;
+                    const position = results.indexOf(driver) + 1;
+                    if (!teamPerformance[teamName].bestPosition || position < teamPerformance[teamName].bestPosition) {
+                        teamPerformance[teamName].bestPosition = position;
+                    }
+                }
+            });
+            
+            performanceHtml += '<h3>Team Performance:</h3>';
+            Object.entries(teamPerformance).forEach(([teamName, data]) => {
+                const bestPos = data.bestPosition ? `P${data.bestPosition}` : 'DNF';
+                const finishRate = data.drivers.length > 0 ? ((data.finishers / data.drivers.length) * 100).toFixed(1) : 0;
+                performanceHtml += `<div>${teamName} (${data.carModel || 'N/A'}): Best ${bestPos}, ${data.finishers}/${data.drivers.length} finished (${finishRate}%)</div>`;
+            });
+            
+            document.getElementById('performanceAnalysis').innerHTML = performanceHtml;
+        }
+
+        // --- Stats Display (using currentDrivers from Firestore) ---
+
+        function displayStats() {
+            // Ensure window.currentDrivers is loaded. If not, this will be called again by onSnapshot
+            if (!window.currentDrivers || window.currentDrivers.length === 0) {
+                 document.getElementById('statsDisplay').innerHTML = `
+                    <div class="stat-card">
+                        <h3>📊 Driver Summary</h3>
+                        <p style="text-align: center; color: #666;">Loading drivers or no drivers added yet...</p>
+                    </div>
+                 `;
+                return;
+            }
+
+            const mainDrivers = window.currentDrivers.filter(d => d.status === 'Main');
+            const reserveDrivers = window.currentDrivers.filter(d => d.status === 'Reserve');
+            const privateers = window.currentDrivers.filter(d => d.status === 'Privateer');
+            
+            const statsHtml = mainDrivers.map(driver => {
+                const car = carData[driver.carModel];
+                // Handle cases where carData might be missing for a driver's carModel
+                const carInfo = car ? `Car: ${driver.carModel} (${car.team})` : `Car: ${driver.carModel} (Unknown)`;
+                const carStats = car ? `
+                    <div>Car Power: ${car.power}/20</div>
+                    <div>Car Cornering: ${car.cornering}/20</div>
+                    <div>Car Reliability: ${car.reliability}/20</div>
+                ` : '<div>Car stats N/A</div>';
+
+                return `
+                    <div class="stat-card">
+                        <h3>#${driver.car} ${driver.name}</h3>
+                        ${carInfo}
+                        <div>Traits: ${driver.traits && driver.traits.length > 0 ? driver.traits.join(', ') : 'None'}</div>
+                        <div>Pace: ${driver.pace > 0 ? '+' : ''}${driver.pace}</div>
+                        <div>Consistency: ${driver.consistency > 0 ? '+' : ''}${driver.consistency}</div>
+                        ${carStats}
+                    </div>
+                `;
+            }).join('');
+            
+            const summaryCard = `
+                <div class="stat-card">
+                    <h3>📊 Driver Summary</h3>
+                    <div>Total Drivers: ${window.currentDrivers.length}</div>
+                    <div>Main Drivers: ${mainDrivers.length}</div>
+                    <div>Reserve Drivers: ${reserveDrivers.length}</div>
+                    <div>Privateers: ${privateers.length}</div>
+                    <div style="margin-top: 10px; font-size: 12px;">
+                        <div><strong>Selection Options:</strong></div>
+                        <div>🏁 Main Only (${mainDrivers.length})</div>
+                        <div>🔄 Main + Reserves (${mainDrivers.length + reserveDrivers.length})</div>
+                        <div>🏴‍☠️ Main + Privateers (${mainDrivers.length + privateers.length})</div>
+                        <div>🌍 Everyone (${window.currentDrivers.length})</div>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('statsDisplay').innerHTML = statsHtml + summaryCard;
+        }
+        window.displayStats = displayStats; // Expose to window
+
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            window.populateCarModelDropdown();
+            // Initial display of empty driver list, will be updated by Firestore listener
+            window.displayDriverList(); 
+            window.displayStats(); // Initial empty stats display
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>🏁 1950s Formula 1 Race Simulator 🏁</h1>
+        <div id="firebaseStatus">Initializing Firebase...</div>
+        <div id="currentUserId">User ID: Loading...</div>
+
+        <div class="main-content">
+            <div class="controls-section">
+                <div class="controls">
+                    <h2>Race Settings</h2>
+                    <div>
+                        <label>Track Type:</label>
+                        <select id="trackType">
+                            <option value="street">Street Circuit</option>
+                            <option value="balanced" selected>Balanced Circuit</option>
+                            <option value="simple">Simple Circuit</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Weather:</label>
+                        <select id="weather">
+                            <option value="dry" selected>Dry</option>
+                            <option value="wet">Wet</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Race Distance (Laps):</label>
+                        <input type="number" id="raceDistance" value="75" min="1">
+                    </div>
+                    <div>
+                        <label>Driver Selection:</label>
+                        <select id="driverSelection">
+                            <option value="main" selected>Main Drivers Only</option>
+                            <option value="all">All Drivers (Main + Reserves)</option>
+                            <option value="main-privateers">Main + Privateers</option>
+                            <option value="everyone">Everyone (Main + Reserves + Privateers)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Development Rounds:</label>
+                        <input type="number" id="devRounds" value="0" min="0" max="10">
+                    </div>
+                    <button onclick="window.simulateQualifying()">🏎️ Run Qualifying</button>
+                    <button onclick="window.simulateRace()">🏁 Run Race</button>
+                </div>
+
+                <div class="driver-management">
+                    <h2>👨‍🎤 Driver Management</h2>
+                    <div class="driver-form">
+                        <div>
+                            <label for="driverName">Name:</label>
+                            <input type="text" id="driverName" placeholder="Driver Name">
+                        </div>
+                        <div>
+                            <label for="driverCarModel">Car Model:</label>
+                            <select id="driverCarModel">
+                                <!-- Options will be populated by JS -->
+                            </select>
+                        </div>
+                        <div>
+                            <label for="driverNationality">Nationality:</label>
+                            <input type="text" id="driverNationality" placeholder="Nationality">
+                        </div>
+                        <div>
+                            <label for="driverTraits">Traits (comma-separated):</label>
+                            <input type="text" id="driverTraits" placeholder="e.g., Talented, Aggressive">
+                        </div>
+                        <div>
+                            <label for="driverPace">Pace (-4 to +4):</label>
+                            <input type="number" id="driverPace" value="0" min="-4" max="4">
+                        </div>
+                        <div>
+                            <label for="driverConsistency">Consistency (-4 to +4):</label>
+                            <input type="number" id="driverConsistency" value="0" min="-4" max="4">
+                        </div>
+                        <div>
+                            <label for="driverStatus">Status:</label>
+                            <select id="driverStatus">
+                                <option value="Main">Main</option>
+                                <option value="Reserve">Reserve</option>
+                                <option value="Privateer">Privateer</option>
+                            </select>
+                        </div>
+                        <button onclick="window.saveDriver()">Add/Update Driver</button>
+                        <input type="hidden" id="currentDriverId"> <!-- Hidden field for editing -->
+                    </div>
+                    <h3>Current Roster:</h3>
+                    <div id="driverList" class="driver-list">
+                        <!-- Driver list will be populated by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <div class="results-stats-section">
+                <div class="qualifying-results" id="qualifyingResults" style="display: none;">
+                    <h2>Qualifying Results</h2>
+                    <div id="qualifyingResultsList"></div>
+                    <p style="text-align: center; margin-top: 10px;">Top 24 qualified for the race.</p>
+                </div>
+
+                <div class="results" id="raceResultsSection" style="display: none;">
+                    <div class="race-results">
+                        <h2>Race Results</h2>
+                        <div id="raceResultsList"></div>
+                    </div>
+                    
+                    <div class="dnf-analysis">
+                        <h2>DNF Analysis</h2>
+                        <div id="dnfAnalysis"></div>
+                    </div>
+                    
+                    <div class="lap-times" style="grid-column: 1 / -1;">
+                        <h2>Performance Analysis</h2>
+                        <div id="performanceAnalysis"></div>
+                    </div>
+                </div>
+
+                <div class="stats-display" id="statsDisplay">
+                    <!-- Car and driver stats will be displayed here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom message box -->
+    <div id="messageBox" class="message-box">
+        <p id="messageText"></p>
+        <button onclick="window.hideMessageBox()">OK</button>
+    </div>
+</body>
+</html>
